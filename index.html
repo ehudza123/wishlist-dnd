@@ -181,6 +181,320 @@ function render() {
     `;
 
     if (isTouch) {
+      // Mobile: long-press to drag, normal taps/scrolls work normally
+      card.addEventListener('touchstart', onTouchStart, { passive: true });
+    } else {
+      // Desktop: immediate drag via pointer events
+      card.addEventListener('pointerdown', onPointerDown);
+    }
+
+    grid.appendChild(card);
+  });
+}
+
+// ===== DESKTOP: immediate pointer drag =====
+function onPointerDown(e) {
+  if (e.button !== 0) return;
+  const card = e.currentTarget;
+  startDrag(card, e.clientX, e.clientY);
+  card.setPointerCapture(e.pointerId);
+  card.addEventListener('pointermove', onPointerMove);
+  card.addEventListener('pointerup', onPointerUp);
+  card.addEventListener('pointercancel', onPointerUp);
+}
+
+function onPointerMove(e) {
+  if (!dragClone) return;
+  e.preventDefault();
+  moveDrag(e.clientX, e.clientY);
+}
+
+function onPointerUp(e) {
+  if (!dragCard) return;
+  dragCard.removeEventListener('pointermove', onPointerMove);
+  dragCard.removeEventListener('pointerup', onPointerUp);
+  dragCard.removeEventListener('pointercancel', onPointerUp);
+  endDrag(e.clientX, e.clientY);
+}
+
+// ===== MOBILE: long-press then drag =====
+const LONG_PRESS_MS = 500;
+const MOVE_THRESHOLD = 10;
+let hintTimer = null;
+
+function onTouchStart(e) {
+  if (e.touches.length !== 1) return;
+  const touch = e.touches[0];
+  const card = e.currentTarget;
+  pendingCard = card;
+  startX = touch.clientX;
+  startY = touch.clientY;
+  touchDragActive = false;
+
+  // Visual hint after 150ms
+  hintTimer = setTimeout(() => {
+    if (pendingCard) pendingCard.classList.add('long-press-pending');
+  }, 150);
+
+  // Activate drag after full hold
+  longPressTimer = setTimeout(() => {
+    if (!pendingCard) return;
+    pendingCard.classList.remove('long-press-pending');
+    touchDragActive = true;
+    startDrag(card, touch.clientX, touch.clientY);
+    if (navigator.vibrate) navigator.vibrate(30);
+
+    // NOW attach move/end listeners that block scrolling
+    document.addEventListener('touchmove', onActiveDragMove, { passive: false });
+    document.addEventListener('touchend', onActiveDragEnd);
+    document.addEventListener('touchcancel', onActiveDragCancel);
+  }, LONG_PRESS_MS);
+
+  // Listen for movement/end to cancel long-press if user scrolls or taps
+  card.addEventListener('touchmove', onPendingMove, { passive: true, once: false });
+  card.addEventListener('touchend', onPendingEnd, { once: true });
+  card.addEventListener('touchcancel', onPendingEnd, { once: true });
+}
+
+// Before long-press activates: if user moves finger, cancel (allow scroll)
+function onPendingMove(e) {
+  if (touchDragActive) return;
+  const touch = e.touches[0];
+  const dx = Math.abs(touch.clientX - startX);
+  const dy = Math.abs(touch.clientY - startY);
+  if (dx > MOVE_THRESHOLD || dy > MOVE_THRESHOLD) {
+    cancelLongPress();
+    cleanupPendingListeners();
+  }
+}
+
+// Before long-press activates: finger lifted = normal tap, not a drag
+function onPendingEnd() {
+  if (!touchDragActive) {
+    cancelLongPress();
+  }
+  cleanupPendingListeners();
+}
+
+function cleanupPendingListeners() {
+  if (pendingCard) {
+    pendingCard.removeEventListener('touchmove', onPendingMove);
+    pendingCard.removeEventListener('touchend', onPendingEnd);
+    pendingCard.removeEventListener('touchcancel', onPendingEnd);
+  }
+}
+
+// After drag is active: move the clone
+function onActiveDragMove(e) {
+  if (!touchDragActive) return;
+  e.preventDefault(); // block scrolling only while dragging
+  const touch = e.touches[0];
+  moveDrag(touch.clientX, touch.clientY);
+}
+
+// After drag is active: drop
+function onActiveDragEnd(e) {
+  if (!touchDragActive) return;
+  const touch = e.changedTouches[0];
+  endDrag(touch.clientX, touch.clientY);
+  touchDragActive = false;
+  removeActiveDragListeners();
+}
+
+function onActiveDragCancel() {
+  touchDragActive = false;
+  cleanup();
+  render();
+  removeActiveDragListeners();
+}
+
+function removeActiveDragListeners() {
+  document.removeEventListener('touchmove', onActiveDragMove);
+  document.removeEventListener('touchend', onActiveDragEnd);
+  document.removeEventListener('touchcancel', onActiveDragCancel);
+}
+
+function cancelLongPress() {
+  clearTimeout(longPressTimer);
+  clearTimeout(hintTimer);
+  if (pendingCard) {
+    pendingCard.classList.remove('long-press-pending');
+    pendingCard = null;
+  }
+}
+
+// ===== SHARED drag logic =====
+function startDrag(card, x, y) {
+  dragCard = card;
+  dragSrcIndex = +card.dataset.index;
+
+  const rect = card.getBoundingClientRect();
+  offsetX = x - rect.left;
+  offsetY = y - rect.top;
+
+  dragClone = card.cloneNode(true);
+  dragClone.classList.add('drag-clone');
+  dragClone.style.width = rect.width + 'px';
+  dragClone.style.left = rect.left + 'px';
+  dragClone.style.top = rect.top + 'px';
+  document.body.appendChild(dragClone);
+
+  card.classList.add('dragging');
+}
+
+function moveDrag(x, y) {
+  if (!dragClone) return;
+
+  dragClone.style.left = (x - offsetX) + 'px';
+  dragClone.style.top = (y - offsetY) + 'px';
+
+  // Find drop target under cursor
+  dragClone.style.display = 'none';
+  const el = document.elementFromPoint(x, y);
+  dragClone.style.display = '';
+
+  document.querySelectorAll('.card.drag-over').forEach(c => c.classList.remove('drag-over'));
+  const target = el?.closest?.('.card');
+  if (target && target !== dragCard) target.classList.add('drag-over');
+}
+
+function endDrag(x, y) {
+  if (!dragCard) return;
+
+  if (dragClone) dragClone.style.display = 'none';
+  const el = document.elementFromPoint(x, y);
+  const target = el?.closest?.('.card');
+
+  if (target && target !== dragCard) {
+    const targetIndex = +target.dataset.index;
+    const [moved] = items.splice(dragSrcIndex, 1);
+    items.splice(targetIndex, 0, moved);
+  }
+
+  cleanup();
+  render();
+}
+
+function cleanup() {
+  if (dragClone) { dragClone.remove(); dragClone = null; }
+  if (dragCard) { dragCard.classList.remove('dragging'); dragCard = null; }
+  cancelLongPress();
+  document.querySelectorAll('.card.drag-over').forEach(c => c.classList.remove('drag-over'));
+}
+
+render();
+</script>
+</body>
+</html>
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: default;
+    transition: opacity 0.15s, background 0.15s;
+    z-index: 2;
+  }
+  .drag-handle:active { cursor: grabbing; background: rgba(255,255,255,1); }
+  .drag-handle svg { width: 16px; height: 16px; color: #666; pointer-events: none; }
+
+  /* Desktop: show on hover. Mobile: always visible */
+  @media (hover: hover) {
+    .drag-handle { opacity: 0; }
+    .card:hover .drag-handle { opacity: 1; }
+  }
+  @media (hover: none) {
+    .drag-handle { opacity: 1; }
+  }
+
+  .order-badge {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    width: 24px;
+    height: 24px;
+    background: rgba(79,70,229,0.9);
+    color: #fff;
+    border-radius: 50%;
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(8px);
+    z-index: 2;
+  }
+
+  /* Floating clone for drag */
+  .drag-clone {
+    position: fixed;
+    z-index: 9999;
+    pointer-events: none;
+    opacity: 0.85;
+    transform: scale(1.05);
+    box-shadow: 0 16px 48px rgba(0,0,0,0.25);
+    border-radius: 16px;
+    transition: none;
+    overflow: hidden;
+  }
+
+  /* Mobile grid */
+  @media (max-width: 520px) {
+    body { padding: 16px; }
+    .grid { grid-template-columns: repeat(2, 1fr); gap: 12px; }
+    .subtitle::after { content: " (hold to drag)"; }
+  }
+</style>
+</head>
+<body>
+
+<h1>my test list</h1>
+<p class="subtitle">Drag items to reorder</p>
+
+<div class="grid" id="grid"></div>
+
+<script>
+const items = [
+  { name: "Serum No. 21", price: "$139.00", img: "https://images.unsplash.com/photo-1611930022073-b7a4ba5fcccd?w=400&h=400&fit=crop" },
+  { name: "Henri Lloyd Sweater", price: "‚Ç¨29.30", img: "https://images.unsplash.com/photo-1620799140408-edc6dcb6d633?w=400&h=400&fit=crop" },
+  { name: "Oversized Shirt", price: "¬•69,300", img: "https://images.unsplash.com/photo-1596755094514-f87e34085b2c?w=400&h=400&fit=crop" },
+  { name: "Playing Cards", price: "$25.00", img: "https://images.unsplash.com/photo-1529480780361-b0fba4c8ce63?w=400&h=400&fit=crop" },
+  { name: "DJI Drone Stand", price: "$16.89", img: "https://images.unsplash.com/photo-1473968512647-3e447244af8f?w=400&h=400&fit=crop" },
+  { name: "Wellington Weekender", price: "$195.00", img: "https://images.unsplash.com/photo-1553062407-98eeb64c6a62?w=400&h=400&fit=crop" },
+];
+
+const grid = document.getElementById('grid');
+const isTouch = matchMedia('(hover: none)').matches;
+
+// Drag state
+let dragCard = null;
+let dragClone = null;
+let dragSrcIndex = null;
+let offsetX = 0, offsetY = 0;
+
+// Touch long-press state
+let longPressTimer = null;
+let touchDragActive = false;
+let pendingCard = null;
+let startX = 0, startY = 0;
+
+function render() {
+  grid.innerHTML = '';
+  items.forEach((item, i) => {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.draggable = false;
+    card.dataset.index = i;
+    card.innerHTML = `
+      <span class="order-badge">${i + 1}</span>
+      <div class="drag-handle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg></div>
+      <img src="${item.img}" alt="${item.name}">
+      <div class="card-body">
+        <h3>${item.name}</h3>
+        <span class="price">${item.price}</span>
+      </div>
+    `;
+
+    if (isTouch) {
       // Mobile: use touch events with long-press to initiate drag
       card.addEventListener('touchstart', onTouchStart, { passive: true });
       card.addEventListener('touchmove', onTouchMove, { passive: false });
